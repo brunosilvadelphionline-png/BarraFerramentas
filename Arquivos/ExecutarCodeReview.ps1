@@ -7,9 +7,11 @@ param(
     [string]$PlanOutputPath = '',
     [string]$InstructionsOutputPath = '',
     [string]$MetadataOutputPath = '',
+    [string]$CompilerDiagnosticsOutputPath = '',
     [string]$LogOutputPath = '',
     [string]$TaskCode = '',
     [string]$Model = '',
+    [string]$CompilerTargets = '',
     [string]$ReviewInputPath = '',
     [string]$SelectedFindingsPath = ''
 )
@@ -297,8 +299,11 @@ function Write-InstructionsFile {
     if (-not [string]::IsNullOrWhiteSpace($instructionsDir)) {
         New-Item -ItemType Directory -Force -Path $instructionsDir | Out-Null
     }
-    $match.Groups['instructions'].Value.Trim() |
-        Set-Content -LiteralPath $InstructionsOutputPath -Encoding UTF8
+    $instructions = $match.Groups['instructions'].Value.Trim()
+    if ($instructions -eq 'Nenhuma instrucao adicional.') {
+        $instructions = ''
+    }
+    $instructions | Set-Content -LiteralPath $InstructionsOutputPath -Encoding UTF8
 }
 
 function Assert-FindingContract {
@@ -371,11 +376,239 @@ function Assert-FindingContract {
     }
 }
 
+function Get-DelphiCompilerDiagnostics {
+    param(
+        [string]$RepositoryRoot,
+        [string[]]$ChangedFiles,
+        [string[]]$SelectedTargets
+    )
+
+    $delphiExtensions = @('.pas', '.dfm', '.dpr', '.inc')
+    $delphiFiles = @(
+        $ChangedFiles | Where-Object {
+            $delphiExtensions -contains [System.IO.Path]::GetExtension($_).ToLowerInvariant()
+        }
+    )
+    if ($delphiFiles.Count -eq 0) {
+        return [pscustomobject]@{
+            Diagnostics = @()
+            Failures = @()
+            Summary = 'Nenhum arquivo Delphi alterado no escopo do code review.'
+        }
+    }
+
+    $dcc32 = 'C:\Program Files (x86)\Borland\Delphi7\Bin\DCC32.EXE'
+    if (-not (Test-Path -LiteralPath $dcc32)) {
+        $message = "Compilador Delphi nao encontrado para verificar hints e warnings: $dcc32"
+        return [pscustomobject]@{
+            Diagnostics = @()
+            Failures = @($message)
+            Summary = $message
+        }
+    }
+
+    $diagnosticFileNames = @{}
+    $projects = @{}
+
+    function Add-DiagnosticFileName {
+        param([string]$FileName)
+
+        if (-not [string]::IsNullOrWhiteSpace($FileName)) {
+            $diagnosticFileNames[$FileName.ToLowerInvariant()] = $FileName
+        }
+    }
+
+    function Add-DelphiProject {
+        param([string]$RelativePath)
+
+        $normalized = $RelativePath.Replace('/', '\')
+        $fullPath = Join-Path $RepositoryRoot $normalized
+        if (-not (Test-Path -LiteralPath $fullPath)) {
+            throw "Projeto Delphi necessario para a verificacao nao encontrado: $fullPath"
+        }
+        $projects[$normalized.ToLowerInvariant()] = $normalized
+    }
+
+    $projectByTarget = @{
+        'sga' = 'SgaDelphi\Sga.dpr'
+        'sgarh' = 'SgaRh\SgaRh.dpr'
+        'sgawscgi' = 'SgaWS\SgaWsCGI.dpr'
+    }
+    foreach ($selectedTarget in $SelectedTargets) {
+        if ([string]::IsNullOrWhiteSpace($selectedTarget)) {
+            continue
+        }
+
+        $targetKey = $selectedTarget.Trim().ToLowerInvariant()
+        if (-not $projectByTarget.ContainsKey($targetKey)) {
+            throw "Executavel desconhecido para a compilacao diagnostica: $selectedTarget"
+        }
+        Add-DelphiProject $projectByTarget[$targetKey]
+    }
+    if ($projects.Count -eq 0) {
+        return [pscustomobject]@{
+            Diagnostics = @()
+            Failures = @()
+            Summary = 'Nenhum executavel Delphi selecionado para a compilacao diagnostica.'
+        }
+    }
+
+    foreach ($changedFile in $delphiFiles) {
+        $fileName = [System.IO.Path]::GetFileName($changedFile)
+        Add-DiagnosticFileName $fileName
+    }
+
+    $repositoryParent = Split-Path -Parent $RepositoryRoot
+    $componentsRoot = Join-Path $repositoryParent 'Componentes'
+    if (-not (Test-Path -LiteralPath $componentsRoot)) {
+        $componentsRoot = 'C:\Desenvolvimento\Componentes'
+    }
+
+    $unitPaths = @(
+        'C:\Program Files (x86)\Borland\Delphi7\Lib',
+        'C:\Program Files (x86)\Borland\Delphi7\Imports',
+        (Join-Path $componentsRoot 'FastMM4'),
+        (Join-Path $RepositoryRoot 'Delphi'),
+        (Join-Path $RepositoryRoot 'SgaDelphi'),
+        (Join-Path $RepositoryRoot 'Sga'),
+        'C:\Program Files (x86)\Devart\UniDAC for Delphi 7\Lib',
+        (Join-Path $RepositoryRoot 'SgaDll'),
+        (Join-Path $RepositoryRoot 'SgaCont'),
+        (Join-Path $RepositoryRoot 'SgaExp'),
+        (Join-Path $RepositoryRoot 'SgaPro'),
+        (Join-Path $RepositoryRoot 'SgaAlm'),
+        (Join-Path $RepositoryRoot 'SgaRec'),
+        (Join-Path $RepositoryRoot 'SgaRh'),
+        (Join-Path $RepositoryRoot 'SgaLab'),
+        (Join-Path $RepositoryRoot 'SgaWS'),
+        (Join-Path $RepositoryRoot 'SgaGuardian'),
+        (Join-Path $RepositoryRoot 'Delphi\ZLib'),
+        (Join-Path $RepositoryRoot 'SgaAgenda'),
+        (Join-Path $componentsRoot 'indy10'),
+        (Join-Path $componentsRoot 'Gnostice\eDocEngine VCL\Lib\D7'),
+        (Join-Path $componentsRoot 'Gnostice\Shared3\Lib\D7'),
+        (Join-Path $componentsRoot 'TNTComponentsSource\Source'),
+        (Join-Path $componentsRoot 'TMS\TMS Smooth Controls'),
+        (Join-Path $componentsRoot 'TMS\TMS Smooth Controls\Delphi7'),
+        (Join-Path $componentsRoot 'HtmlViewer\source'),
+        (Join-Path $componentsRoot 'CEF4Delphi'),
+        (Join-Path $componentsRoot 'CEF4Delphi\source'),
+        'C:\Program Files\TecnoSpeed\NFSe\Fontes',
+        'C:\Program Files\TecnoSpeed\NFSe Nacional\Fontes',
+        'C:\Program Files (x86)\madCollection\madBasic\Delphi 7',
+        'C:\Program Files (x86)\madCollection\madDisAsm\Delphi 7',
+        'C:\Program Files (x86)\madCollection\madExcept\Delphi 7',
+        'C:\Program Files (x86)\madCollection\Plugins\win32',
+        'C:\Program Files (x86)\madCollection\madKernel\Delphi 7',
+        'C:\Program Files (x86)\madCollection\madSecurity\Delphi 7',
+        'C:\Program Files (x86)\madCollection\madShell\Delphi 7'
+    ) | Where-Object { Test-Path -LiteralPath $_ } | Sort-Object -Unique
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) (
+        'gerador-review-compile-' + [guid]::NewGuid().ToString('N')
+    )
+    New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
+
+    $relevantDiagnostics = New-Object System.Collections.Generic.List[string]
+    $compilerFailures = New-Object System.Collections.Generic.List[string]
+    try {
+        foreach ($projectRelativePath in ($projects.Values | Sort-Object)) {
+            $projectPath = Join-Path $RepositoryRoot $projectRelativePath
+            $projectName = [System.IO.Path]::GetFileNameWithoutExtension($projectPath)
+            $projectOutput = Join-Path $tempRoot $projectName
+            $dcuOutput = Join-Path $projectOutput 'DCU'
+            New-Item -ItemType Directory -Path $dcuOutput -Force | Out-Null
+
+            $compilerArguments = @(
+                '-B',
+                $projectPath,
+                '-Q',
+                '-W+',
+                '-H+',
+                '-$J+',
+                ('-E' + $projectOutput),
+                ('-N' + $dcuOutput)
+            )
+            foreach ($unitPath in $unitPaths) {
+                $compilerArguments += '-u' + $unitPath
+            }
+
+            $previousErrorActionPreference = $ErrorActionPreference
+            Push-Location (Split-Path -Parent $projectPath)
+            try {
+                # O DCC32 pode escrever diagnosticos em stderr. Eles precisam
+                # ser capturados mesmo com ErrorActionPreference=Stop no script.
+                $ErrorActionPreference = 'Continue'
+                $compilerOutput = @(& $dcc32 @compilerArguments 2>&1 | ForEach-Object {
+                    $_.ToString()
+                })
+                $compilerExitCode = $LASTEXITCODE
+            } finally {
+                $ErrorActionPreference = $previousErrorActionPreference
+                Pop-Location
+            }
+
+            foreach ($line in $compilerOutput) {
+                if ($line -notmatch '(?i)\b(?:hint|warning)\b') {
+                    continue
+                }
+
+                foreach ($diagnosticFileName in $diagnosticFileNames.Values) {
+                    $filePattern = '(?i)(?<![A-Z0-9_.-])' +
+                        [regex]::Escape($diagnosticFileName) +
+                        '(?=\(|:|\s|$)'
+                    if ([regex]::IsMatch($line, $filePattern)) {
+                        $entry = "[$projectRelativePath] $line"
+                        if (-not $relevantDiagnostics.Contains($entry)) {
+                            [void]$relevantDiagnostics.Add($entry)
+                        }
+                        break
+                    }
+                }
+            }
+
+            if ($compilerExitCode -ne 0) {
+                $failure = "A compilacao diagnostica de '$projectRelativePath' nao foi concluida (codigo $compilerExitCode)."
+                $failureDetails = @($compilerOutput | Where-Object {
+                    $_ -match '(?i)\b(?:error|fatal)\b'
+                } | Select-Object -Last 5)
+                if ($failureDetails.Count -gt 0) {
+                    $failure = $failure + ' ' + ($failureDetails -join ' | ')
+                }
+                [void]$compilerFailures.Add($failure)
+            }
+        }
+    } finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    if ($relevantDiagnostics.Count -eq 0) {
+        $summary = 'Nenhum hint ou warning do compilador Delphi foi encontrado nos arquivos alterados.'
+    } else {
+        $summary = $relevantDiagnostics -join "`r`n"
+    }
+    if ($compilerFailures.Count -gt 0) {
+        $summary = $summary + "`r`n`r`nAvisos da compilacao diagnostica:`r`n" +
+            ($compilerFailures -join "`r`n")
+    }
+
+    return [pscustomobject]@{
+        Diagnostics = @($relevantDiagnostics.ToArray())
+        Failures = @($compilerFailures.ToArray())
+        Summary = $summary
+    }
+}
+
 function Write-MetadataFile {
     param(
         [string]$Branch,
         [string]$BaseRef,
-        [string[]]$Files
+        [string[]]$Files,
+        [string]$CompilerStatus = 'nao_aplicavel',
+        [string]$CompilerMessage = '',
+        [int]$CompilerDiagnosticCount = 0
     )
 
     $metadataDir = Split-Path -Parent $MetadataOutputPath
@@ -383,6 +616,7 @@ function Write-MetadataFile {
         New-Item -ItemType Directory -Force -Path $metadataDir | Out-Null
     }
 
+    $singleLineCompilerMessage = $CompilerMessage -replace '[\r\n]+', ' | '
     @(
         '[Review]'
         "RepoRoot=$RepoRoot"
@@ -391,7 +625,32 @@ function Write-MetadataFile {
         "TaskCode=$TaskCode"
         "ChangedFileCount=$($Files.Count)"
         "AnalyzedAt=$((Get-Date).ToString('yyyy-MM-ddTHH:mm:ss.fff'))"
+        ''
+        '[Compiler]'
+        "Status=$CompilerStatus"
+        "Message=$singleLineCompilerMessage"
+        "DiagnosticCount=$CompilerDiagnosticCount"
     ) | Set-Content -LiteralPath $MetadataOutputPath -Encoding ASCII
+}
+
+function Get-TrackedDiffFingerprint {
+    $diffLines = @(
+        & git -C $RepoRoot diff --no-ext-diff --binary HEAD --
+    )
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Nao foi possivel obter o diff rastreado do repositorio.'
+    }
+
+    $diffText = $diffLines -join "`n"
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $diffBytes = [System.Text.Encoding]::UTF8.GetBytes($diffText)
+        return ([System.BitConverter]::ToString(
+            $sha256.ComputeHash($diffBytes)
+        ) -replace '-', '')
+    } finally {
+        $sha256.Dispose()
+    }
 }
 
 function Invoke-CodexRun {
@@ -472,6 +731,15 @@ try {
         $MetadataOutputPath = Join-Path (Split-Path -Parent $OutputPath) 'code-review.ini'
     }
 
+    if ([string]::IsNullOrWhiteSpace($CompilerDiagnosticsOutputPath)) {
+        $CompilerDiagnosticsOutputPath = Join-Path `
+            (Split-Path -Parent $OutputPath) 'compiler-diagnostics.txt'
+    }
+    $compilerDiagnosticsDir = Split-Path -Parent $CompilerDiagnosticsOutputPath
+    if (-not [string]::IsNullOrWhiteSpace($compilerDiagnosticsDir)) {
+        New-Item -ItemType Directory -Force -Path $compilerDiagnosticsDir | Out-Null
+    }
+
     if ([string]::IsNullOrWhiteSpace($LogOutputPath)) {
         $LogOutputPath = [System.IO.Path]::ChangeExtension($OutputPath, '.log')
     }
@@ -510,17 +778,22 @@ try {
                 Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
         )
         if ($selectedFindings.Count -eq 0) {
-            throw 'Nenhum achado tecnico foi selecionado para resolucao.'
+            throw 'Nenhum item foi selecionado para resolucao.'
         }
 
         $resolvePrompt = @"
-Resolva exclusivamente os achados tecnicos selecionados abaixo no repositorio atual.
+Resolva exclusivamente os achados tecnicos e diagnosticos do compilador selecionados abaixo no repositorio atual.
 
 Regras obrigatorias:
+- Esta execucao especifica foi iniciada pelo usuario pelo resolvedor automatico do Gerador de executavel para teste.
+- A selecao explicita dos achados, opcoes e diagnosticos pelo usuario representa a entrevista, o alinhamento e a autorizacao para implementar somente esses itens.
+- Somente nesta execucao, nao interrompa o trabalho para entrevistar o usuario novamente e nao devolva perguntas antes de editar.
 - Altere os arquivos localmente para corrigir somente os achados selecionados.
+- Para achado sem alternativas, aplique a correcao recomendada descrita no code review original.
 - Quando um achado possuir a linha OPCAO ESCOLHIDA, implemente exatamente essa opcao e nao aplique as demais alternativas do mesmo achado.
 - Cada linha OPCAO ESCOLHIDA pertence ao rotulo ACHADO imediatamente anterior e representa uma diretriz, nao um achado separado.
 - Se um achado com alternativas nao possuir uma OPCAO ESCOLHIDA valida, nao o altere e registre a pendencia.
+- Cada linha iniciada por COMPILADOR- representa um hint ou warning real selecionado individualmente pelo desenvolvedor e deve ser corrigido.
 - Nao crie commit, nao envie alteracoes e nao altere achados que nao foram selecionados.
 - Preserve o comportamento existente fora do escopo das correcoes.
 - Execute validacoes proporcionais ao risco quando estiverem disponiveis.
@@ -530,7 +803,7 @@ Regras obrigatorias:
 Formato obrigatorio do resumo final:
 # Resolucao com Codex - $TaskCode
 ## Achados resolvidos
-Para cada linha iniciada por ACHADO-, use como titulo de nivel 3 exatamente o mesmo rotulo selecionado.
+Para cada linha iniciada por ACHADO- ou COMPILADOR-, use como titulo de nivel 3 exatamente o mesmo rotulo selecionado.
 Nao crie titulo para linhas OPCAO ESCOLHIDA.
 ## Alteracoes realizadas
 ## Validacoes executadas
@@ -539,7 +812,7 @@ Nao crie titulo para linhas OPCAO ESCOLHIDA.
 Tarefa: $TaskCode
 Repositorio: $RepoRoot
 
-Achados e opcoes selecionados pelo desenvolvedor:
+Achados, opcoes e diagnosticos selecionados pelo desenvolvedor:
 $($selectedFindings -join "`n")
 
 Code review original:
@@ -548,8 +821,13 @@ $originalReview
 ~~~
 "@
 
+        $trackedDiffBefore = Get-TrackedDiffFingerprint
         $resolveRun = Invoke-CodexRun -Prompt $resolvePrompt -Sandbox 'workspace-write'
         Assert-CodexRun -Run $resolveRun
+        $trackedDiffAfter = Get-TrackedDiffFingerprint
+        if ($trackedDiffAfter -eq $trackedDiffBefore) {
+            throw 'O Codex encerrou sem produzir alteracoes rastreadas no repositorio. Consulte o resumo e o log da resolucao para verificar as pendencias.'
+        }
         if (-not (Test-Path -LiteralPath $OutputPath)) {
             throw "Resumo da resolucao nao foi gerado: $OutputPath"
         }
@@ -609,6 +887,9 @@ Nenhuma alteracao de codigo foi encontrada nos commits da branch apos master, no
 ## Achados tecnicos
 Nenhum problema tecnico encontrado.
 
+## Hints e warnings do compilador
+Nenhum arquivo Delphi alterado no escopo do code review.
+
 ## Areas impactadas
 - Nao foi possivel identificar areas impactadas sem alteracoes de codigo.
 
@@ -621,7 +902,7 @@ Nenhum problema tecnico encontrado.
 - Depois: sem alteracao elegivel para analisar.
 
 ## $InstructionsHeading
-- Nenhuma instrucao adicional foi identificada sem alteracoes de codigo.
+Nenhuma instrucao adicional.
 
 ## Plano de testes para QA
 - Confirmar a abertura do executavel e validar o fluxo principal informado na tarefa.
@@ -629,8 +910,39 @@ Nenhum problema tecnico encontrado.
 "@
         Write-InstructionsFile -MarkdownPath $OutputPath
         Write-PlanFile -MarkdownPath $OutputPath
-        Write-MetadataFile -Branch $branch -BaseRef $baseRef -Files @()
+        Set-Content -LiteralPath $CompilerDiagnosticsOutputPath `
+            -Value @() -Encoding UTF8
+        Write-MetadataFile -Branch $branch -BaseRef $baseRef -Files @() `
+            -CompilerStatus 'nao_aplicavel'
         exit 0
+    }
+
+    $selectedCompilerTargets = @(
+        $CompilerTargets -split ';' | Where-Object {
+            -not [string]::IsNullOrWhiteSpace($_)
+        }
+    )
+    try {
+        $compilerResult = Get-DelphiCompilerDiagnostics `
+            -RepositoryRoot $RepoRoot `
+            -ChangedFiles $files `
+            -SelectedTargets $selectedCompilerTargets
+    } catch {
+        $compilerResult = [pscustomobject]@{
+            Diagnostics = @()
+            Failures = @($_.Exception.Message)
+            Summary = 'A compilacao diagnostica nao foi concluida: ' + $_.Exception.Message
+        }
+    }
+    Set-Content -LiteralPath $CompilerDiagnosticsOutputPath `
+        -Value @($compilerResult.Diagnostics) -Encoding UTF8
+    $compilerDiagnostics = $compilerResult.Summary
+    if ($compilerResult.Failures.Count -gt 0) {
+        $compilerStatus = 'erro'
+        $compilerMessage = $compilerResult.Failures -join ' | '
+    } else {
+        $compilerStatus = 'sucesso'
+        $compilerMessage = ''
     }
 
     $prompt = @"
@@ -647,6 +959,9 @@ Escopo obrigatorio:
 - Consultar os diffs por arquivo quando isso ajudar a controlar o volume da analise.
 - Outros arquivos versionados podem ser consultados apenas como contexto, mas nao devem gerar achados fora do escopo alterado.
 - Priorizar bugs, regressoes, problemas Delphi/VCL, vazamento de recurso, SQL inseguro, erros em eventos/forms .dfm, compatibilidade e falta de teste.
+- Apresentar os diagnosticos reais do compilador Delphi fornecidos ao final deste prompt somente na secao Hints e warnings do compilador.
+- Nao transformar hints ou warnings do compilador em ACHADO-NNN; eles possuem selecao e resolucao independentes no gerador.
+- Preservar nessa secao todos os diagnosticos e avisos de falha da compilacao fornecidos, sem omitir itens.
 - Nao alterar arquivos.
 - Retornar achados com severidade, arquivo e motivo. Se nao houver problemas, dizer isso claramente.
 - Para cada problema real, criar um titulo de nivel 3 no formato exato: `### ACHADO-NNN | SEVERIDADE | Rotulo curto e unico`.
@@ -661,19 +976,22 @@ Escopo obrigatorio:
 - Se nao houver problema tecnico, escrever apenas `Nenhum problema tecnico encontrado.` na secao de achados e nao criar titulo de nivel 3.
 - Mapear areas e rotinas de negocio impactadas e explicar o que muda daqui para frente.
 - Trazer exemplos concretos de antes/depois.
-- Antes do plano, criar uma secao separada com informacoes relevantes para o tester preparar e localizar o teste.
-- Na secao de instrucoes, incluir somente campos, flags, parametros, caminhos, pre-requisitos, configuracoes e comportamentos efetivamente criados ou alterados pela tarefa.
-- Quando houver novos campos, flags ou parametros visiveis, informar o caminho funcional completo, incluindo menu, tela, aba e nome exibido do campo ou flag.
-- Nao mencionar itens que nao foram criados ou alterados, como ausencia de novo parametro, campo, flag ou configuracao.
+- Antes do plano, criar uma secao separada somente para novidades que o tester precisa localizar ou habilitar antes de executar o teste.
+- Na secao de instrucoes, incluir exclusivamente elementos novos criados pela tarefa, como campos, flags, parametros, opcoes de configuracao, botoes, menus ou telas que nao existiam antes.
+- Para cada item novo, informar o caminho funcional completo, incluindo menu, tela, aba e nome exibido, alem do valor ou acao necessario para habilitar o teste quando aplicavel.
+- Nao incluir elementos preexistentes, ainda que sejam usados no teste, nem explicacoes gerais sobre o cenario ou comportamento.
+- Nao incluir preparacao de empresa, filial, periodo, massa de dados ou ambiente; passos de execucao; telas preexistentes usadas no fluxo; validacoes; resultados esperados ou ferramentas de conferencia. Colocar todo esse conteudo exclusivamente no plano de testes.
+- Se a tarefa nao criar nenhum campo, flag, parametro, opcao de configuracao, botao, menu ou tela, escrever somente `Nenhuma instrucao adicional.` nesta secao.
 - Nao incluir achados tecnicos, pendencias de correcao ou orientacoes para adiar o teste ou a homologacao. As instrucoes e o plano devem considerar o estado final esperado da tarefa, com os achados resolvidos.
-- Incluir somente pre-requisitos, configuracoes e observacoes operacionais necessarias ao teste das mudancas. Nao repetir passos que pertencem ao plano de testes.
 - Criar um plano de testes curto, separado, voltado ao QA/operacional, sem citar codigo, classes, metodos ou detalhes de implementacao.
+- Concentrar no plano todos os pre-requisitos, preparacao do cenario e da massa de dados, passos de execucao, validacoes, resultados esperados e ferramentas de conferencia.
 - Responder em portugues.
 
 Formato obrigatorio, mantendo exatamente estes titulos de nivel 2:
 # Code review - $TaskCode
 ## Resumo executivo
 ## Achados tecnicos
+## Hints e warnings do compilador
 ## Areas impactadas
 ## Comportamento daqui para frente
 ## Exemplos antes/depois
@@ -681,9 +999,14 @@ Formato obrigatorio, mantendo exatamente estes titulos de nivel 2:
 ## Plano de testes para QA
 
 Os dois ultimos topicos devem ser, nesta ordem, $InstructionsHeadingPrompt e Plano de testes para QA.
-O ultimo topico deve continuar contendo apenas passos operacionais curtos e objetivos.
+O ultimo topico deve continuar contendo apenas passos operacionais curtos e objetivos, incluindo toda a preparacao e validacao necessarias.
 
 Tarefa: $TaskCode
+
+Diagnosticos reais do compilador Delphi, previamente filtrados para os arquivos alterados no escopo Git:
+~~~text
+$compilerDiagnostics
+~~~
 "@
 
     $reviewRun = Invoke-CodexRun -Prompt $prompt -Sandbox 'read-only'
@@ -698,7 +1021,10 @@ Tarefa: $TaskCode
     Write-ReviewHtml -MarkdownPath $OutputPath -HtmlPath $HtmlOutputPath
     Write-InstructionsFile -MarkdownPath $OutputPath
     Write-PlanFile -MarkdownPath $OutputPath
-    Write-MetadataFile -Branch $branch -BaseRef $baseRef -Files $files
+    Write-MetadataFile -Branch $branch -BaseRef $baseRef -Files $files `
+        -CompilerStatus $compilerStatus `
+        -CompilerMessage $compilerMessage `
+        -CompilerDiagnosticCount $compilerResult.Diagnostics.Count
 
     if (-not (Test-Path -LiteralPath $HtmlOutputPath)) {
         throw "Arquivo HTML nao foi gerado: $HtmlOutputPath"
@@ -710,6 +1036,10 @@ Tarefa: $TaskCode
 
     if (-not (Test-Path -LiteralPath $InstructionsOutputPath)) {
         throw "Instrucoes de teste nao foram geradas: $InstructionsOutputPath"
+    }
+
+    if (-not (Test-Path -LiteralPath $CompilerDiagnosticsOutputPath)) {
+        throw "Diagnosticos do compilador nao foram gerados: $CompilerDiagnosticsOutputPath"
     }
 
     exit 0
