@@ -397,6 +397,14 @@ function Get-DelphiCompilerDiagnostics {
         }
     }
 
+    if ($SelectedTargets.Count -eq 0) {
+        return [pscustomobject]@{
+            Diagnostics = @()
+            Failures = @()
+            Summary = 'Compilacao Delphi nao aplicavel aos artefatos selecionados.'
+        }
+    }
+
     $dcc32 = 'C:\Program Files (x86)\Borland\Delphi7\Bin\DCC32.EXE'
     if (-not (Test-Path -LiteralPath $dcc32)) {
         $message = "Compilador Delphi nao encontrado para verificar hints e warnings: $dcc32"
@@ -949,6 +957,11 @@ Nenhuma instrucao adicional.
 Faca um code review objetivo em Markdown das alteracoes versionadas existentes no repositorio atual.
 
 Escopo obrigatorio:
+- Esta execucao e exclusivamente de analise em modo somente leitura; nao alterar, criar ou excluir arquivos.
+- Esta execucao e automatica e nao possui interacao com o usuario durante a revisao.
+- Nao interromper a revisao para entrevistar o usuario e nao retornar perguntas fora do relatorio obrigatorio.
+- Quando faltar uma definicao funcional ou surgir uma duvida que dependa do usuario, registrar a duvida como ACHADO-NNN, explicar o risco e apresentar as respostas possiveis como opcoes mutuamente exclusivas.
+- Nesses casos, marcar como RECOMENDADA a opcao mais conservadora e compativel com o comportamento existente; a escolha definitiva sera feita pelo usuario somente no fluxo posterior Resolver com Codex.
 - Descobrir o escopo executando Git no proprio repositorio, que ja esta definido como diretorio de trabalho.
 - Calcular o ponto de divergencia com `git merge-base master HEAD` e analisar os commits da branch com `git diff --no-ext-diff <merge-base>..HEAD`.
 - Considerar somente as alteracoes que estao do lado da branch atual depois da divergencia; nao incluir commits exclusivos de master.
@@ -962,7 +975,7 @@ Escopo obrigatorio:
 - Apresentar os diagnosticos reais do compilador Delphi fornecidos ao final deste prompt somente na secao Hints e warnings do compilador.
 - Nao transformar hints ou warnings do compilador em ACHADO-NNN; eles possuem selecao e resolucao independentes no gerador.
 - Preservar nessa secao todos os diagnosticos e avisos de falha da compilacao fornecidos, sem omitir itens.
-- Nao alterar arquivos.
+- Nao alterar arquivos em nenhuma circunstancia durante o code review.
 - Retornar achados com severidade, arquivo e motivo. Se nao houver problemas, dizer isso claramente.
 - Para cada problema real, criar um titulo de nivel 3 no formato exato: `### ACHADO-NNN | SEVERIDADE | Rotulo curto e unico`.
 - Numerar os rotulos sequencialmente a partir de ACHADO-001 e nao reutilizar rotulos.
